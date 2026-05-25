@@ -1,0 +1,10 @@
+.venv/
+outputs/
+*.csv
+*.shp
+*.dbf
+*.shx
+*.prj
+*.cpg
+*.qmd
+__pycache__/
