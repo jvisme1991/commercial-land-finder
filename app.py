@@ -175,38 +175,15 @@ def results_for_csv(results):
     return results
 
 
-def redevelopment_badge(score):
+def redevelopment_tier(score):
     if pd.isna(score):
         return ""
     score = int(score)
     if score >= 75:
-        return f"High ({score})"
+        return "High"
     if score >= 50:
-        return f"Medium ({score})"
-    return f"Low ({score})"
-
-
-def style_redevelopment_badges(data):
-    styles = pd.DataFrame("", index=data.index, columns=data.columns)
-    if "redevelopment_badge" not in data.columns:
-        return styles
-
-    for index, value in data["redevelopment_score"].items():
-        if pd.isna(value):
-            continue
-        if value >= 75:
-            styles.loc[index, "redevelopment_badge"] = (
-                "background-color: #166534; color: white; font-weight: 700;"
-            )
-        elif value >= 50:
-            styles.loc[index, "redevelopment_badge"] = (
-                "background-color: #f59e0b; color: black; font-weight: 700;"
-            )
-        else:
-            styles.loc[index, "redevelopment_badge"] = (
-                "background-color: #e5e7eb; color: #111827;"
-            )
-    return styles
+        return "Medium"
+    return "Low"
 
 
 def get_parcel_key_frame(data):
@@ -615,20 +592,16 @@ if "results" in st.session_state and "output_path" in st.session_state:
     if "redevelopment_score" in selection_table.columns:
         selection_table.insert(
             1,
-            "redevelopment_badge",
-            selection_table["redevelopment_score"].apply(redevelopment_badge),
+            "redevelopment_tier",
+            selection_table["redevelopment_score"].apply(redevelopment_tier),
         )
     selection_table.insert(0, "select_for_enrichment", False)
 
     st.caption(
         "Use the checkbox column or the parcel selector below to choose parcels for highlighting and manual enrichment."
     )
-    styled_selection_table = selection_table.style.apply(
-        style_redevelopment_badges,
-        axis=None,
-    )
     edited_selection_table = st.data_editor(
-        styled_selection_table,
+        selection_table,
         use_container_width=True,
         hide_index=True,
         disabled=[
