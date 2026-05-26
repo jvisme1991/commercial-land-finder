@@ -1,6 +1,7 @@
 from datetime import datetime
 from pathlib import Path
 import re
+from urllib.parse import quote
 
 import geopandas as gpd
 import pandas as pd
@@ -19,6 +20,8 @@ MAX_ACRES = 10
 BUFFER_FEET = 500
 LOW_IMPROVEMENT_RATIO = 0.25
 HIGH_LAND_VALUE_RATIO = 0.70
+LOW_IMPROVEMENT_FLAG_RATIO = 0.25
+HIGH_LAND_VALUE_FLAG_RATIO = 0.70
 CAD_SEARCH_URL = "https://smithcad-search.gsacorp.io/"
 
 TARGET_ROADS = [
@@ -42,6 +45,11 @@ OWNERSHIP_OUTPUT_COLUMNS = [
     "land_value",
     "improvement_value",
     "notes",
+    "reviewed",
+    "lead_status",
+    "transfer_date",
+    "use_code",
+    "exemptions",
 ]
 
 OWNERSHIP_COLUMN_CANDIDATES = {
@@ -96,6 +104,11 @@ OWNERSHIP_COLUMN_CANDIDATES = {
         "Improvement Market Value",
     ],
     "notes": ["notes", "Notes", "NOTES"],
+    "reviewed": ["reviewed", "Reviewed", "mark_reviewed", "Mark Reviewed"],
+    "lead_status": ["lead_status", "Lead Status", "status", "Status"],
+    "transfer_date": ["transfer_date", "Transfer Date", "Sale Date", "Deed Date"],
+    "use_code": ["use_code", "Use Code", "Property Use", "LU"],
+    "exemptions": ["exemptions", "Exemptions", "EXEMPTIONS"],
 }
 
 
@@ -128,6 +141,16 @@ def clean_money(series):
     return pd.to_numeric(cleaned, errors="coerce")
 
 
+def build_cad_lookup_link(account):
+    account = str(account).strip()
+    if account and account.casefold() != "nan":
+        encoded_account = quote(account)
+        if account.isdigit():
+            return f"{CAD_SEARCH_URL.rstrip('/')}/parcel/{encoded_account}"
+        return f"{CAD_SEARCH_URL.rstrip('/')}/search/r/{encoded_account}"
+    return CAD_SEARCH_URL
+
+
 def has_filter_value(value):
     return value is not None and pd.notna(value)
 
@@ -151,6 +174,77 @@ def apply_numeric_range_filter(data, column, min_value=None, max_value=None):
         filtered = filtered[filtered[column].le(max_value)].copy()
 
     return filtered
+
+
+def normalize_bool(series):
+    return (
+        series.fillna("")
+        .astype(str)
+        .str.strip()
+        .str.casefold()
+        .isin(["true", "1", "yes", "y"])
+    )
+
+
+def parse_transfer_year(series):
+    dates = pd.to_datetime(series, errors="coerce")
+    year_from_date = dates.dt.year
+    year_from_text = (
+        series.fillna("")
+        .astype(str)
+        .str.extract(r"\b(19\d{2}|20\d{2})\b", expand=False)
+    )
+    return year_from_date.fillna(pd.to_numeric(year_from_text, errors="coerce"))
+
+
+def calculate_redevelopment_fields(parcels):
+    current_year = datetime.now().year
+    transfer_year = parse_transfer_year(parcels["transfer_date"])
+    parcels["ownership_years"] = (current_year - transfer_year).where(
+        transfer_year.notna()
+    )
+
+    use_code_text = parcels["use_code"].fillna("").astype(str).str.casefold()
+    type_text = parcels["Type"].fillna("").astype(str).str.casefold()
+
+    parcels["low_improvement_flag"] = parcels["improvement_ratio"].le(
+        LOW_IMPROVEMENT_FLAG_RATIO
+    )
+    parcels["high_land_value_flag"] = parcels["land_to_total_value_ratio"].gt(
+        HIGH_LAND_VALUE_FLAG_RATIO
+    )
+    parcels["vacant_probability"] = 0
+
+    vacant_terms = ["vacant", "commercial lots", "lot", "land", "common"]
+    parcels.loc[
+        use_code_text.apply(lambda value: any(term in value for term in vacant_terms)),
+        "vacant_probability",
+    ] += 40
+    parcels.loc[parcels["improvement_value"].fillna(0).eq(0), "vacant_probability"] += 35
+    parcels.loc[parcels["low_improvement_flag"] == True, "vacant_probability"] += 15
+    parcels.loc[parcels["high_land_value_flag"] == True, "vacant_probability"] += 10
+    parcels["vacant_probability"] = parcels["vacant_probability"].clip(upper=100)
+
+    parcels["redevelopment_score"] = 0
+    parcels.loc[parcels["low_improvement_flag"] == True, "redevelopment_score"] += 20
+    parcels.loc[parcels["high_land_value_flag"] == True, "redevelopment_score"] += 20
+    parcels.loc[parcels["ownership_years"].ge(10), "redevelopment_score"] += 10
+    parcels.loc[parcels["ownership_years"].ge(20), "redevelopment_score"] += 10
+    parcels.loc[parcels["CALC_ACRE"].ge(1), "redevelopment_score"] += 5
+    parcels.loc[parcels["CALC_ACRE"].ge(3), "redevelopment_score"] += 10
+    parcels.loc[parcels["CALC_ACRE"].ge(5), "redevelopment_score"] += 5
+    parcels.loc[
+        type_text.str.contains("commercial") | use_code_text.str.contains("commercial"),
+        "redevelopment_score",
+    ] += 10
+    parcels.loc[
+        use_code_text.apply(lambda value: any(term in value for term in vacant_terms)),
+        "redevelopment_score",
+    ] += 15
+    parcels.loc[parcels["improvement_value"].fillna(0).eq(0), "redevelopment_score"] += 10
+    parcels["redevelopment_score"] = parcels["redevelopment_score"].clip(upper=100)
+
+    return parcels
 
 
 def load_layers():
@@ -202,6 +296,12 @@ def add_ownership_data(parcels):
 
     for output_column in OWNERSHIP_OUTPUT_COLUMNS:
         parcels[output_column] = pd.NA
+        if output_column not in ownership.columns:
+            ownership[output_column] = pd.NA
+
+    for join_column in ["ACCOUNT", "PARCELID"]:
+        if join_column not in ownership.columns:
+            ownership[join_column] = pd.NA
 
     if not ownership.empty:
         parcels["_ACCOUNT_JOIN"] = clean_join_key(parcels["ACCOUNT"])
@@ -255,7 +355,10 @@ def add_ownership_data(parcels):
     total_value = parcels["appraised_value"].where(parcels["appraised_value"] != 0)
     parcels["improvement_ratio"] = parcels["improvement_value"] / total_value
     parcels["land_to_total_value_ratio"] = parcels["land_value"] / total_value
-    parcels["cad_lookup_link"] = CAD_SEARCH_URL
+    parcels["cad_lookup_link"] = parcels["ACCOUNT"].apply(build_cad_lookup_link)
+    parcels["reviewed"] = normalize_bool(parcels["reviewed"])
+    parcels["lead_status"] = parcels["lead_status"].fillna("").astype(str).str.strip()
+    parcels = calculate_redevelopment_fields(parcels)
 
     return parcels
 
@@ -275,6 +378,10 @@ def run_search(
     max_improvement_ratio=None,
     min_land_value_ratio=None,
     max_land_value_ratio=None,
+    hide_reviewed=False,
+    hide_dead_leads=False,
+    hide_listed_properties=False,
+    min_redevelopment_score=None,
     output_path=None,
 ):
     target_roads = target_roads or TARGET_ROADS
@@ -335,6 +442,21 @@ def run_search(
             parcels_near_roads["absentee_owner"] == True
         ].copy()
 
+    if hide_reviewed:
+        parcels_near_roads = parcels_near_roads[
+            parcels_near_roads["reviewed"] != True
+        ].copy()
+
+    if hide_dead_leads:
+        parcels_near_roads = parcels_near_roads[
+            parcels_near_roads["lead_status"].fillna("").str.casefold() != "dead lead"
+        ].copy()
+
+    if hide_listed_properties:
+        parcels_near_roads = parcels_near_roads[
+            parcels_near_roads["lead_status"].fillna("").str.casefold() != "listed"
+        ].copy()
+
     parcels_near_roads = apply_numeric_range_filter(
         parcels_near_roads,
         "appraised_value",
@@ -352,6 +474,13 @@ def run_search(
         "land_to_total_value_ratio",
         min_land_value_ratio,
         max_land_value_ratio,
+    )
+
+    parcels_near_roads = apply_numeric_range_filter(
+        parcels_near_roads,
+        "redevelopment_score",
+        min_redevelopment_score,
+        None,
     )
 
     parcels_near_roads["score"] = 0
@@ -407,6 +536,16 @@ def run_search(
         "land_value",
         "improvement_value",
         "notes",
+        "reviewed",
+        "lead_status",
+        "transfer_date",
+        "use_code",
+        "exemptions",
+        "ownership_years",
+        "redevelopment_score",
+        "vacant_probability",
+        "low_improvement_flag",
+        "high_land_value_flag",
         "absentee_owner",
         "improvement_ratio",
         "land_to_total_value_ratio",
@@ -415,7 +554,7 @@ def run_search(
     ]
 
     results = parcels_near_roads[output_columns + ["geometry"]].sort_values(
-        by="score",
+        by=["redevelopment_score", "score"],
         ascending=False,
     )
 

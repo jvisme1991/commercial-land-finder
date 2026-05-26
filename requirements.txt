@@ -6,3 +6,5 @@ pyogrio
 pyproj
 shapely
 folium
+beautifulsoup4
+requests

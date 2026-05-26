@@ -23,6 +23,10 @@ The app loads parcels, roads, and city limits from the `data` folder, runs the s
 - Commercial only yes/no
 - City status: any, inside city limits, or outside city limits
 - Absentee owners only yes/no
+- Hide reviewed parcels yes/no
+- Hide dead leads yes/no
+- Hide listed properties yes/no
+- Minimum redevelopment score
 - Minimum and maximum appraised value
 - Minimum and maximum improvement ratio percentage
 - Minimum and maximum land percentage
@@ -35,7 +39,9 @@ Place ownership/appraisal CSV files in `data/ownership`. The app joins them to p
 
 The CSV can use common column names for owner, mailing address, mailing city, appraised value, land value, and improvement value. Results include absentee owner, improvement ratio, and land-to-total-value ratio calculations.
 
-The app also creates `data/ownership/manual_enrichment.csv` for manual CAD lookup work. Select parcels from the results table or map selector, open the CAD lookup link, enter owner/value details in the enrichment editor, and save. Future searches automatically merge those saved records by `ACCOUNT`.
+The app also creates `data/ownership/manual_enrichment.csv` for CAD lookup work. Select parcels from the results table or map selector, open the direct Smith CAD parcel link, use the copy buttons for account/address, enter owner/value details, mark reviewed, set lead status, and save. Future searches automatically merge those saved records by `ACCOUNT`.
+
+Selected parcels can also be cautiously enriched from Smith CAD. The app looks up only selected numeric `ACCOUNT` values, skips already-enriched accounts unless refresh is checked, waits 3 seconds between lookups, and limits each run to the selected max count.
 
 ## Scoring
 
@@ -90,3 +96,5 @@ The command-line script still works and writes `outputs/land_search_results.csv`
 Each app search saves a timestamped CSV in `outputs`, and the app also provides a CSV download button.
 
 Search results also include summary metrics and an interactive Folium map with parcel popups for acreage, address, parcel ID, and score.
+
+The app calculates redevelopment fields including ownership years, redevelopment score, vacant probability, low improvement flag, and high land value flag. Results are sorted by redevelopment score, include a top opportunities section, and show color-coded redevelopment summary badges.
